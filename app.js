@@ -614,6 +614,84 @@ function populateSignalPeptideOptions() {
   }
 }
 
+function populateSpChangeSignalPeptideOptions() {
+  const host = el("spChangeHostSelect")?.value;
+  const select = el("spChangeSignalPeptideSelect");
+  if (!host || !select) return;
+  const previous = select.value;
+  select.innerHTML = "";
+  for (const signal of HOST_CONFIG[host].signalPeptides) {
+    const option = document.createElement("option");
+    option.value = signal.id;
+    option.textContent = `${signal.label} (${signal.aa})`;
+    select.appendChild(option);
+  }
+  if ([...select.options].some((option) => option.value === previous)) {
+    select.value = previous;
+  }
+}
+
+function currentSpChangeConfig() {
+  const host = el("spChangeHostSelect").value;
+  const signalPeptideId = el("spChangeSignalPeptideSelect").value;
+  return {
+    enabled: el("spChangeToggle").checked,
+    host,
+    signalPeptide: HOST_CONFIG[host].signalPeptides.find((item) => item.id === signalPeptideId) || HOST_CONFIG[host].signalPeptides[0],
+    fivePrimeEnzyme: el("spChangeFivePrimeEnzyme").value,
+    threePrimeEnzyme: el("spChangeThreePrimeEnzyme").value,
+    hisTag: el("spChangeHisTagToggle").checked,
+  };
+}
+
+function spChangeTargetTemplateDna() {
+  const template = stripTerminalStop(cleanDna(el("optimizedDnaInput").value) || proteinState?.reverseTranslatedDna || "");
+  if (!template || !proteinState) return template;
+  try {
+    const nativeSignal = resolveNativeSignal(proteinState.inputProtein, currentConfig());
+    const nativeSignalBp = nativeSignal ? nativeSignal.aa.length * 3 : 0;
+    return nativeSignalBp && template.length > nativeSignalBp ? template.slice(nativeSignalBp) : template;
+  } catch {
+    return template;
+  }
+}
+
+function renderSpChangePreview() {
+  const panel = el("spChangePanel");
+  if (!panel) return;
+  const config = currentSpChangeConfig();
+  panel.hidden = !config.enabled;
+  setStatus(el("spChangeStatus"), config.enabled ? "SP 변경" : "대기", config.enabled ? "ok" : "neutral");
+  if (!config.enabled) return;
+
+  const fivePrimeSite = RESTRICTION_SITES[config.fivePrimeEnzyme];
+  const threePrimeSite = RESTRICTION_SITES[config.threePrimeEnzyme];
+  const kozak = config.host === "Baculovirus" ? "" : KOZAK_SEQ;
+  const target = spChangeTargetTemplateDna();
+  const targetN18 = target.slice(0, TEMPLATE_ANNEAL_BP) || "TARGET_N18";
+  const targetC18 = target.slice(-TEMPLATE_ANNEAL_BP) || "TARGET_C18";
+  const cTermParts = config.hisTag ? `${HIS6_DNA} + ${STOP_CODON}` : "no C-terminal His/stop";
+
+  el("spChangePreview").textContent = [
+    "SP change cloning preview",
+    "==========================",
+    `Host: ${HOST_CONFIG[config.host].label}`,
+    `Selected SP: ${config.signalPeptide.label}`,
+    `5' enzyme: ${config.fivePrimeEnzyme} (${fivePrimeSite})`,
+    `3' enzyme: ${config.threePrimeEnzyme} (${threePrimeSite})`,
+    `C-terminal His tag: ${config.hisTag ? `${HIS6_AA} (${HIS6_DNA}) + stop (${STOP_CODON})` : "not included"}`,
+    "",
+    "Forward primer design:",
+    `${RE_CLAMP} + ${fivePrimeSite} + ${kozak ? `${kozak} + ` : ""}${config.signalPeptide.dna} + ${targetN18}`,
+    "",
+    "Reverse primer design:",
+    `reverse-complement(${cTermParts} + ${threePrimeSite}) + reverse-complement(${targetC18})`,
+    "",
+    "Construct components:",
+    `${fivePrimeSite} + ${kozak ? `${kozak} + ` : ""}${config.signalPeptide.dna} + target DNA(SP 제외) + ${cTermParts} + ${threePrimeSite}`,
+  ].join("\n");
+}
+
 function syncControls() {
   const config = currentConfig();
   const hostLabel = HOST_CONFIG[config.host].label;
@@ -700,12 +778,19 @@ function resetApp() {
 document.addEventListener("DOMContentLoaded", () => {
   populateVectorOptions();
   populateSignalPeptideOptions();
+  populateSpChangeSignalPeptideOptions();
   syncHostOrganismToHost();
   syncControls();
+  renderSpChangePreview();
 
   el("hostSelect").addEventListener("change", () => {
     populateVectorOptions();
     populateSignalPeptideOptions();
+    if (el("spChangeHostSelect")) {
+      el("spChangeHostSelect").value = el("hostSelect").value;
+      populateSpChangeSignalPeptideOptions();
+      renderSpChangePreview();
+    }
     syncHostOrganismToHost();
     syncSignalSelectionToVector();
     syncControls();
@@ -719,6 +804,14 @@ document.addEventListener("DOMContentLoaded", () => {
   ["vectorSelect", "signalStrategySelect", "signalPeptideSelect", "nativeSignalAa", "cleavageProbability", "nativeSignalLabel", "tmStart", "tmEnd", "infusionToggle", "forwardOverlap", "reverseOverlap", "codonToolSelect", "hostOrganismSelect", "accessionInput", "purposeInput", "notesInput"].forEach((id) => {
     el(id).addEventListener("input", syncControls);
     el(id).addEventListener("change", syncControls);
+  });
+  ["spChangeToggle", "spChangeSignalPeptideSelect", "spChangeFivePrimeEnzyme", "spChangeThreePrimeEnzyme", "spChangeHisTagToggle", "optimizedDnaInput", "nativeSignalAa", "nativeSignalLabel"].forEach((id) => {
+    el(id).addEventListener("input", renderSpChangePreview);
+    el(id).addEventListener("change", renderSpChangePreview);
+  });
+  el("spChangeHostSelect").addEventListener("change", () => {
+    populateSpChangeSignalPeptideOptions();
+    renderSpChangePreview();
   });
   ["signalStrategySelect", "signalPeptideSelect", "nativeSignalAa", "nativeSignalLabel", "tmStart", "tmEnd"].forEach((id) => {
     el(id).addEventListener("input", () => {
