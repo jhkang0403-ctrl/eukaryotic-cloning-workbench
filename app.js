@@ -69,11 +69,12 @@ const HOST_CONFIG = {
 };
 
 const KOZAK_SEQ = "GCCACC";
+const GS_LINKER_DNA = "GGCAGC";
+const GS_LINKER_AA = "GS";
 const HIS6_DNA = "GGATCTCATCATCATCACCATCAC";
 const HIS6_AA = "GSHHHHHH";
 const STOP_CODON = "TAA";
-const EXTRA_5 = "GCCA";
-const EXTRA_3 = "GCCA";
+const RE_CLAMP = "GCGCGC";
 const DNA_COMPLEMENT = { A: "T", T: "A", C: "G", G: "C", N: "N" };
 
 let proteinState = null;
@@ -111,6 +112,11 @@ function translateDna(dna) {
   return aa.join("");
 }
 
+function translateFromFirstAtg(dna) {
+  const start = dna.indexOf("ATG");
+  return start === -1 ? "" : translateDna(dna.slice(start));
+}
+
 function reverseTranslate(protein) {
   return [...protein].map((aa) => OPTIMAL_CODONS[aa] || "NNN").join("");
 }
@@ -118,6 +124,10 @@ function reverseTranslate(protein) {
 function stripTerminalStop(dna) {
   const stop = dna.slice(-3);
   return ["TAA", "TAG", "TGA"].includes(stop) ? dna.slice(0, -3) : dna;
+}
+
+function ensureStartCodon(dna) {
+  return dna.startsWith("ATG") ? dna : `ATG${dna}`;
 }
 
 function reverseTranslateDesignedProtein(proteinState) {
@@ -227,20 +237,56 @@ function vectorEncodedSignalPeptide(config) {
   return null;
 }
 
+function parseAaRange(text) {
+  const match = String(text || "").match(/(?:^|[^\d])(\d+)\s*(?:-|~|to|\.\.)\s*(\d+)(?:\s*aa)?(?:$|[^\d])/i);
+  if (!match) return null;
+  const start = Number(match[1]);
+  const end = Number(match[2]);
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < start) return null;
+  return { start, end };
+}
+
+function resolveNativeSignal(inputProtein, config) {
+  const explicitAa = cleanProtein(config.nativeSignalAa);
+  if (explicitAa) {
+    return {
+      aa: explicitAa,
+      start: 1,
+      end: explicitAa.length,
+      exactMatch: inputProtein.startsWith(explicitAa),
+      source: "AA input",
+    };
+  }
+
+  const range = parseAaRange(config.nativeSignalLabel);
+  if (!range) return null;
+  if (range.end > inputProtein.length) {
+    throw new Error(`Native signal peptide range must be within 1-${inputProtein.length} aa.`);
+  }
+  return {
+    aa: inputProtein.slice(range.start - 1, range.end),
+    start: range.start,
+    end: range.end,
+    exactMatch: range.start === 1,
+    source: `${range.start}-${range.end}`,
+  };
+}
+
 function designProtein(inputProtein, config) {
   let designed = inputProtein;
   let targetProtein = inputProtein;
   const notes = [];
-  let nativeMatched = false;
+  const nativeSignal = resolveNativeSignal(inputProtein, config);
+  const nativeMatched = Boolean(nativeSignal);
 
-  if (config.nativeSignalAa && designed.startsWith(config.nativeSignalAa)) {
-    nativeMatched = true;
-    notes.push(`Native signal peptide: ${config.nativeSignalLabel || config.nativeSignalAa}`);
+  if (nativeSignal) {
+    const label = config.nativeSignalLabel || nativeSignal.source || nativeSignal.aa;
+    notes.push(`Native signal peptide: ${label}${nativeSignal.exactMatch ? "" : " (applied by length)"}`);
   }
 
   if (config.signalStrategy === "none") {
     if (nativeMatched) {
-      const mature = designed.slice(config.nativeSignalAa.length);
+      const mature = designed.slice(nativeSignal.end);
       designed = `M${mature}`;
       targetProtein = designed;
       notes.push("Signal peptide removed for cytosol expression");
@@ -250,12 +296,15 @@ function designProtein(inputProtein, config) {
   }
 
   if (config.signalStrategy === "native") {
+    if (nativeSignal && !nativeSignal.exactMatch) {
+      designed = `${nativeSignal.aa}${inputProtein.slice(nativeSignal.end)}`;
+    }
     targetProtein = designed;
     notes.push(nativeMatched ? "Native signal peptide retained" : "Native signal peptide strategy selected");
   }
 
   if (config.signalStrategy === "heterologous") {
-    const mature = nativeMatched ? designed.slice(config.nativeSignalAa.length) : designed.replace(/^M/, "");
+    const mature = nativeMatched ? designed.slice(nativeSignal.end) : designed.replace(/^M/, "");
     designed = `${config.signalPeptide.aa}${mature}`;
     targetProtein = designed;
     notes.push(`${config.signalPeptide.label} signal peptide inserted`);
@@ -263,7 +312,7 @@ function designProtein(inputProtein, config) {
 
   const vectorSp = vectorEncodedSignalPeptide(config);
   if (config.host === "Baculovirus") {
-    const mature = nativeMatched ? inputProtein.slice(config.nativeSignalAa.length) : inputProtein.replace(/^M/, "");
+    const mature = nativeMatched ? inputProtein.slice(nativeSignal.end) : inputProtein.replace(/^M/, "");
     targetProtein = `M${mature}`;
     if (vectorSp) {
       designed = `${vectorSp.aa}GS${mature}`;
@@ -287,28 +336,39 @@ function designProtein(inputProtein, config) {
   return { inputProtein, designedProtein: designed, targetProtein, notes, config };
 }
 
-function buildConstruct(cdsNoStop, config) {
-  if (config.host === "Baculovirus") {
-    return `${RESTRICTION_SITES.BamHI}${cdsNoStop}${RESTRICTION_SITES.XhoI}`;
-  }
-  return `${RESTRICTION_SITES.HindIII}${KOZAK_SEQ}${cdsNoStop}${HIS6_DNA}${STOP_CODON}${RESTRICTION_SITES.BamHI}`;
-}
+function cloningParts(cdsNoStop, config) {
+  const forwardPrimerTail = config.infusionEnabled ? config.forwardOverlap : RE_CLAMP;
+  const reversePrimerTail = config.infusionEnabled ? config.reverseOverlap : RE_CLAMP;
 
-function annotate(cdsNoStop, config) {
-  const parts = config.host === "Baculovirus"
-    ? [
+  if (config.host === "Baculovirus") {
+    return [
+      [config.infusionEnabled ? "Vector overlap N" : "5' restriction clamp", forwardPrimerTail],
       ["BamHI", RESTRICTION_SITES.BamHI],
       ["Target DNA", cdsNoStop],
       ["XhoI", RESTRICTION_SITES.XhoI],
-    ]
-    : [
-      ["HindIII", RESTRICTION_SITES.HindIII],
-      ["Kozak", KOZAK_SEQ],
-      ["SP + Target DNA", cdsNoStop],
-      [`6xHis tag (${HIS6_AA})`, HIS6_DNA],
-      ["Stop codon", STOP_CODON],
-      ["BamHI", RESTRICTION_SITES.BamHI],
-    ];
+      [config.infusionEnabled ? "Vector overlap C" : "3' restriction clamp", reversePrimerTail],
+    ].filter(([, seq]) => seq);
+  }
+
+  return [
+    [config.infusionEnabled ? "Vector overlap N" : "5' restriction clamp", forwardPrimerTail],
+    ["HindIII", RESTRICTION_SITES.HindIII],
+    ["Kozak", KOZAK_SEQ],
+    ["SP + Target DNA", cdsNoStop],
+    [`GS linker (${GS_LINKER_AA})`, GS_LINKER_DNA],
+    [`6xHis tag (${HIS6_AA})`, HIS6_DNA],
+    ["Stop codon", STOP_CODON],
+    ["BamHI", RESTRICTION_SITES.BamHI],
+    [config.infusionEnabled ? "Vector overlap C" : "3' restriction clamp", reversePrimerTail],
+  ].filter(([, seq]) => seq);
+}
+
+function buildConstruct(cdsNoStop, config) {
+  return cloningParts(cdsNoStop, config).map(([, seq]) => seq).join("");
+}
+
+function annotate(cdsNoStop, config) {
+  const parts = cloningParts(cdsNoStop, config);
   let pos = 1;
   return parts.map(([label, seq]) => {
     const row = { label, start: pos, end: pos + seq.length - 1, seq };
@@ -320,19 +380,11 @@ function annotate(cdsNoStop, config) {
 function makePrimers(cdsNoStop, config) {
   const forwardAnneal = cdsNoStop.slice(0, chooseAnnealLength(cdsNoStop, false));
   const reverseAnnealCoding = cdsNoStop.slice(-chooseAnnealLength(cdsNoStop, true));
-  const forwardTail = config.infusionEnabled
-    ? `${config.forwardOverlap}${config.host === "Baculovirus" ? "" : KOZAK_SEQ}`
-    : config.host === "Baculovirus"
-      ? RESTRICTION_SITES.BamHI
-      : `${RESTRICTION_SITES.HindIII}${KOZAK_SEQ}`;
-  const reverseTemplate = config.infusionEnabled
-    ? config.host === "Baculovirus"
-      ? reverseAnnealCoding
-      : `${reverseAnnealCoding}${HIS6_DNA}${STOP_CODON}`
-    : config.host === "Baculovirus"
-      ? `${reverseAnnealCoding}${RESTRICTION_SITES.XhoI}`
-      : `${reverseAnnealCoding}${HIS6_DNA}${STOP_CODON}${RESTRICTION_SITES.BamHI}`;
-  const reverseTail = config.infusionEnabled ? config.reverseOverlap : "";
+  const parts = cloningParts(cdsNoStop, config);
+  const targetIndex = parts.findIndex(([label]) => label === "Target DNA" || label === "SP + Target DNA");
+  const forwardTail = parts.slice(0, targetIndex).map(([, seq]) => seq).join("");
+  const reverseExtension = parts.slice(targetIndex + 1).map(([, seq]) => seq).join("");
+  const reversePrimerTail = reverseComplement(reverseExtension);
   const reverseAnneal = reverseComplement(reverseAnnealCoding);
 
   return {
@@ -347,8 +399,8 @@ function makePrimers(cdsNoStop, config) {
     },
     reverse: {
       name: `${config.host}_${config.vector}_${config.infusionEnabled ? "Infusion" : config.host === "Baculovirus" ? "XhoI" : "BamHI"}_R`,
-      sequence: `${reverseTail}${reverseComplement(reverseTemplate)}`,
-      tail: reverseTail || reverseComplement(reverseTemplate).slice(0, reverseComplement(reverseTemplate).length - reverseAnneal.length),
+      sequence: `${reversePrimerTail}${reverseAnneal}`,
+      tail: reversePrimerTail,
       anneal: reverseAnneal,
       tm: wallaceTm(reverseAnneal),
       gc: gcPercent(reverseAnneal),
@@ -356,23 +408,63 @@ function makePrimers(cdsNoStop, config) {
   };
 }
 
+function normalizeCdsForConstruct(cdsNoStop, config) {
+  if (config.host === "HEK" || config.host === "CHO") {
+    return ensureStartCodon(cdsNoStop);
+  }
+  if (config.host === "Baculovirus") {
+    return ensureStartCodon(cdsNoStop);
+  }
+  return cdsNoStop;
+}
+
+function refreshProteinDesign() {
+  if (!proteinState) return;
+  const previousReverseTranslatedDna = proteinState.reverseTranslatedDna;
+  proteinState = designProtein(proteinState.inputProtein, currentConfig());
+  proteinState.reverseTranslatedDna = previousReverseTranslatedDna;
+  finalState = null;
+  renderProteinState();
+}
+
 function finalAnalyze() {
   if (!proteinState) throw new Error("먼저 아미노산 서열을 적용하세요.");
-  const config = currentConfig();
+  refreshProteinDesign();
+  const config = proteinState.config;
   const dnaInput = cleanDna(el("optimizedDnaInput").value);
-  const cdsNoStop = stripTerminalStop(dnaInput || proteinState.reverseTranslatedDna || "");
+  const cdsNoStop = normalizeCdsForConstruct(stripTerminalStop(dnaInput || proteinState.reverseTranslatedDna || ""), config);
   if (!cdsNoStop) throw new Error("Reverse translation 또는 codon optimization DNA가 필요합니다.");
   if (!cdsNoStop.startsWith("ATG")) throw new Error("최종 CDS는 ATG로 시작해야 합니다.");
   if (cdsNoStop.length % 3 !== 0) throw new Error("최종 CDS 길이는 3의 배수여야 합니다.");
 
   const translated = translateDna(cdsNoStop);
-  const restriction = findRestrictionSites(cdsNoStop);
   const construct = buildConstruct(cdsNoStop, config);
+  const constructTranslated = translateFromFirstAtg(construct);
+  const restriction = findRestrictionSites(construct);
   const parts = annotate(cdsNoStop, config);
   const primers = makePrimers(cdsNoStop, config);
-  const mismatch = translated !== proteinState.targetProtein;
+  const expectedConstructProtein = config.host === "Baculovirus"
+    ? translated
+    : translateDna(`${cdsNoStop}${GS_LINKER_DNA}${HIS6_DNA}`);
+  const targetMismatch = translated !== proteinState.targetProtein;
+  const constructMismatch = constructTranslated !== expectedConstructProtein;
+  const mismatch = targetMismatch || constructMismatch;
 
-  return { ...proteinState, config, cdsNoStop, translated, restriction, construct, parts, primers, mismatch };
+  return {
+    ...proteinState,
+    config,
+    cdsNoStop,
+    translated,
+    construct,
+    constructTranslated,
+    expectedConstructProtein,
+    restriction,
+    parts,
+    primers,
+    targetMismatch,
+    constructMismatch,
+    mismatch,
+  };
 }
 
 function setStatus(node, text, type = "neutral") {
@@ -454,13 +546,13 @@ function reportText() {
     `Native SP label: ${finalState.config.nativeSignalLabel || "-"}`,
     `SignalP cleavage site probability: ${finalState.config.cleavageProbability || "-"}`,
     `Selected/vector SP: ${vectorSp ? `${vectorSp.label} (${vectorSp.aa}) - vector encoded; GS linker after SP` : finalState.config.signalStrategy === "heterologous" ? `${finalState.config.signalPeptide.label} (${finalState.config.signalPeptide.aa})` : "-"}`,
-    `C-terminal tag: ${finalState.config.host === "Baculovirus" ? "vector-encoded C-term His tag; excluded from insert" : `${HIS6_AA} (${HIS6_DNA})`}`,
+    `C-terminal tag: ${finalState.config.host === "Baculovirus" ? "vector-encoded C-term His tag; excluded from insert" : `${GS_LINKER_AA} linker (${GS_LINKER_DNA}) + ${HIS6_AA} (${HIS6_DNA})`}`,
     `Design notes: ${finalState.notes.join(" / ") || "none"}`,
-    `Designed protein length: ${finalState.designedProtein.length} aa`,
+    `Designed protein length: ${(finalState.constructTranslated || finalState.designedProtein).length} aa`,
     `Final CDS/target DNA length: ${finalState.cdsNoStop.length} bp`,
     `Cloning construct length: ${finalState.construct.length} bp`,
-    `Restriction sites: ${problems.length ? problems.map((row) => `${row.enzyme} at ${row.positions.join(",")}`).join("; ") : "none detected in final CDS"}`,
-    `Translation check: ${finalState.mismatch ? "warning - optimized DNA translation differs from designed protein" : "OK"}`,
+    `Restriction sites: ${problems.length ? problems.map((row) => `${row.enzyme} at ${row.positions.join(",")}`).join("; ") : "none detected in cloning construct"}`,
+    `Translation check: ${finalState.mismatch ? "warning - DNA translation differs from designed protein" : "OK"}`,
     `Primer mode: ${finalState.primers.mode}`,
   ].join("\n");
 }
@@ -468,6 +560,18 @@ function reportText() {
 function renderSequenceTab() {
   const out = el("sequenceOutput");
   if (activeTab === "report") out.textContent = reportText();
+  if (activeTab === "protein") {
+    out.textContent = finalState
+      ? fasta("designed_protein_from_cloning_construct", finalState.constructTranslated)
+      : proteinState
+        ? fasta("designed_protein", proteinState.designedProtein)
+        : "?꾨??몄궛 ?쒖뿴 ?곸슜 ???쒖떆?⑸땲??";
+    return;
+  }
+  if (activeTab === "cds") {
+    out.textContent = finalState ? fasta("final_cds_with_primer_parts", finalState.construct) : "理쒖쥌 CDS 遺꾩꽍 ???쒖떆?⑸땲??";
+    return;
+  }
   if (activeTab === "protein") out.textContent = proteinState ? fasta("designed_protein", proteinState.designedProtein) : "아미노산 서열 적용 후 표시됩니다.";
   if (activeTab === "cds") out.textContent = finalState ? fasta("final_cds", finalState.cdsNoStop) : "최종 CDS 분석 후 표시됩니다.";
   if (activeTab === "construct") out.textContent = finalState ? fasta("cloning_construct", finalState.construct) : "최종 CDS 분석 후 표시됩니다.";
@@ -595,14 +699,24 @@ document.addEventListener("DOMContentLoaded", () => {
     syncHostOrganismToHost();
     syncSignalSelectionToVector();
     syncControls();
+    try { refreshProteinDesign(); showMessage(""); } catch (error) { showMessage(error.message); }
   });
   el("vectorSelect").addEventListener("change", () => {
     syncSignalSelectionToVector();
     syncControls();
+    try { refreshProteinDesign(); showMessage(""); } catch (error) { showMessage(error.message); }
   });
   ["vectorSelect", "signalStrategySelect", "signalPeptideSelect", "nativeSignalAa", "cleavageProbability", "nativeSignalLabel", "tmStart", "tmEnd", "infusionToggle", "forwardOverlap", "reverseOverlap", "codonToolSelect", "hostOrganismSelect", "accessionInput", "purposeInput", "notesInput"].forEach((id) => {
     el(id).addEventListener("input", syncControls);
     el(id).addEventListener("change", syncControls);
+  });
+  ["signalStrategySelect", "signalPeptideSelect", "nativeSignalAa", "nativeSignalLabel", "tmStart", "tmEnd"].forEach((id) => {
+    el(id).addEventListener("input", () => {
+      try { refreshProteinDesign(); showMessage(""); } catch (error) { showMessage(error.message); }
+    });
+    el(id).addEventListener("change", () => {
+      try { refreshProteinDesign(); showMessage(""); } catch (error) { showMessage(error.message); }
+    });
   });
 
   el("prepareProteinBtn").addEventListener("click", () => {
@@ -624,8 +738,14 @@ document.addEventListener("DOMContentLoaded", () => {
     if (proteinState) el("finalAnalyzeBtn").disabled = false;
   });
 
-  el("copyProteinBtn").addEventListener("click", () => proteinState && copyText(fasta("designed_protein", proteinState.designedProtein)));
-  el("copyDesignedProteinBtn").addEventListener("click", () => proteinState && copyText(fasta("designed_protein", proteinState.designedProtein)));
+  el("copyProteinBtn").addEventListener("click", () => {
+    const protein = finalState?.constructTranslated || proteinState?.designedProtein;
+    if (protein) copyText(fasta("designed_protein", protein));
+  });
+  el("copyDesignedProteinBtn").addEventListener("click", () => {
+    const protein = finalState?.constructTranslated || proteinState?.designedProtein;
+    if (protein) copyText(fasta("designed_protein", protein));
+  });
   el("copyReverseTranslatedBtn").addEventListener("click", () => proteinState?.reverseTranslatedDna && copyText(formatSeq(proteinState.reverseTranslatedDna)));
   el("copyForwardPrimerBtn").addEventListener("click", () => finalState && copyText(`${finalState.primers.forward.name}\n${finalState.primers.forward.sequence}`));
   el("copyReversePrimerBtn").addEventListener("click", () => finalState && copyText(`${finalState.primers.reverse.name}\n${finalState.primers.reverse.sequence}`));
