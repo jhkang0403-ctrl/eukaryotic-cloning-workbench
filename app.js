@@ -75,6 +75,7 @@ const HIS6_DNA = "GGATCTCATCATCATCACCATCAC";
 const HIS6_AA = "GSHHHHHH";
 const STOP_CODON = "TAA";
 const RE_CLAMP = "GCGCGC";
+const TEMPLATE_ANNEAL_BP = 18;
 const DNA_COMPLEMENT = { A: "T", T: "A", C: "G", G: "C", N: "N" };
 
 let proteinState = null;
@@ -377,12 +378,18 @@ function annotate(cdsNoStop, config) {
   });
 }
 
-function makePrimers(cdsNoStop, config) {
-  const forwardAnneal = cdsNoStop.slice(0, chooseAnnealLength(cdsNoStop, false));
-  const reverseAnnealCoding = cdsNoStop.slice(-chooseAnnealLength(cdsNoStop, true));
+function makePrimers(cdsNoStop, config, templateCdsNoStop = cdsNoStop) {
+  if (templateCdsNoStop.length < TEMPLATE_ANNEAL_BP) {
+    throw new Error(`Codon optimization DNA must be at least ${TEMPLATE_ANNEAL_BP} bp for primer annealing.`);
+  }
+  const forwardAnneal = templateCdsNoStop.slice(0, TEMPLATE_ANNEAL_BP);
+  const reverseAnnealCoding = templateCdsNoStop.slice(-TEMPLATE_ANNEAL_BP);
+  const targetPrefix = cdsNoStop.endsWith(templateCdsNoStop)
+    ? cdsNoStop.slice(0, cdsNoStop.length - templateCdsNoStop.length)
+    : "";
   const parts = cloningParts(cdsNoStop, config);
   const targetIndex = parts.findIndex(([label]) => label === "Target DNA" || label === "SP + Target DNA");
-  const forwardTail = parts.slice(0, targetIndex).map(([, seq]) => seq).join("");
+  const forwardTail = `${parts.slice(0, targetIndex).map(([, seq]) => seq).join("")}${targetPrefix}`;
   const reverseExtension = parts.slice(targetIndex + 1).map(([, seq]) => seq).join("");
   const reversePrimerTail = reverseComplement(reverseExtension);
   const reverseAnneal = reverseComplement(reverseAnnealCoding);
@@ -409,6 +416,7 @@ function makePrimers(cdsNoStop, config) {
 }
 
 function normalizeCdsForConstruct(cdsNoStop, config) {
+  if (!cdsNoStop) return "";
   if (config.host === "HEK" || config.host === "CHO") {
     return ensureStartCodon(cdsNoStop);
   }
@@ -432,7 +440,8 @@ function finalAnalyze() {
   refreshProteinDesign();
   const config = proteinState.config;
   const dnaInput = cleanDna(el("optimizedDnaInput").value);
-  const cdsNoStop = normalizeCdsForConstruct(stripTerminalStop(dnaInput || proteinState.reverseTranslatedDna || ""), config);
+  const templateCdsNoStop = stripTerminalStop(dnaInput || proteinState.reverseTranslatedDna || "");
+  const cdsNoStop = normalizeCdsForConstruct(templateCdsNoStop, config);
   if (!cdsNoStop) throw new Error("Reverse translation 또는 codon optimization DNA가 필요합니다.");
   if (!cdsNoStop.startsWith("ATG")) throw new Error("최종 CDS는 ATG로 시작해야 합니다.");
   if (cdsNoStop.length % 3 !== 0) throw new Error("최종 CDS 길이는 3의 배수여야 합니다.");
@@ -442,7 +451,7 @@ function finalAnalyze() {
   const constructTranslated = translateFromFirstAtg(construct);
   const restriction = findRestrictionSites(construct);
   const parts = annotate(cdsNoStop, config);
-  const primers = makePrimers(cdsNoStop, config);
+  const primers = makePrimers(cdsNoStop, config, templateCdsNoStop);
   const expectedConstructProtein = config.host === "Baculovirus"
     ? translated
     : translateDna(`${cdsNoStop}${GS_LINKER_DNA}${HIS6_DNA}`);
@@ -453,6 +462,7 @@ function finalAnalyze() {
   return {
     ...proteinState,
     config,
+    templateCdsNoStop,
     cdsNoStop,
     translated,
     construct,
