@@ -162,6 +162,71 @@
       </label>
     </section>
 
+    <section class="panel">
+      <div class="section-title">
+        <div>
+          <h2>4. Signal peptide 변경 클로닝</h2>
+          <p>Codon optimization DNA를 template으로 사용하고, signal peptide와 host를 바꿔 새 construct용 primer를 설계합니다.</p>
+        </div>
+        <span id="spChangeStatus" class="status-pill neutral">대기</span>
+      </div>
+
+      <label class="check-row">
+        <input id="spChangeToggle" type="checkbox">
+        <span>Signal peptide 변경하여 다른 construct 진행</span>
+      </label>
+
+      <div id="spChangePanel" class="sub-panel" hidden>
+        <div class="config-grid">
+          <label>
+            <span>변경 후 host</span>
+            <select id="spChangeHostSelect">
+              <option value="HEK">HEK</option>
+              <option value="CHO">CHO</option>
+              <option value="Baculovirus">Baculovirus (insect cell)</option>
+            </select>
+          </label>
+          <label>
+            <span>사용할 signal peptide</span>
+            <select id="spChangeSignalPeptideSelect"></select>
+          </label>
+          <label>
+            <span>5' restriction enzyme</span>
+            <select id="spChangeFivePrimeEnzyme">
+              <option value="HindIII">HindIII (AAGCTT)</option>
+              <option value="BamHI">BamHI (GGATCC)</option>
+              <option value="BglII">BglII (AGATCT)</option>
+              <option value="KpnI">KpnI (GGTACC)</option>
+              <option value="SalI">SalI (GTCGAC)</option>
+              <option value="XhoI">XhoI (CTCGAG)</option>
+            </select>
+          </label>
+          <label>
+            <span>3' restriction enzyme</span>
+            <select id="spChangeThreePrimeEnzyme">
+              <option value="BamHI">BamHI (GGATCC)</option>
+              <option value="HindIII">HindIII (AAGCTT)</option>
+              <option value="BglII">BglII (AGATCT)</option>
+              <option value="KpnI">KpnI (GGTACC)</option>
+              <option value="SalI">SalI (GTCGAC)</option>
+              <option value="XhoI">XhoI (CTCGAG)</option>
+            </select>
+          </label>
+        </div>
+
+        <label class="check-row">
+          <input id="spChangeHisTagToggle" type="checkbox" checked>
+          <span>C-terminal GSHHHHHH + stop codon 포함</span>
+        </label>
+
+        <div class="info-strip">
+          Forward primer annealing: codon optimization DNA에서 기존 signal peptide를 제외한 target N-말단 18 bp와 겹치도록 설계
+        </div>
+
+        <pre id="spChangePreview" class="sequence-box small">Signal peptide 변경 클로닝 옵션을 선택하면 construct 구성 preview가 표시됩니다.</pre>
+      </div>
+    </section>
+
     <section class="grid">
       <article class="panel">
         <div class="section-title compact">
@@ -184,7 +249,7 @@
       </article>
       <article class="panel">
         <div class="section-title compact">
-          <h2>4. 제한효소 유무 확인</h2>
+          <h2>5. 제한효소 유무 확인</h2>
           <span id="restrictionSummary" class="status-pill neutral">대기</span>
         </div>
         <div id="restrictionTable" class="table-like empty-state">최종 DNA 분석 후 표시됩니다.</div>
